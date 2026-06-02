@@ -8,6 +8,21 @@ The `wendell` CLI package is open source under the MIT License. The public CLI
 does not include the hosted Wendell service, internal suite compiler, scoring
 service, web app, or production infrastructure.
 
+## Agent skill
+
+[![skills.sh](https://skills.sh/b/WendellOfficial/wendell-cli)](https://skills.sh/WendellOfficial/wendell-cli)
+
+Install the Wendell skill for coding agents that support Vercel's Skills
+Registry:
+
+```bash
+npx skills add WendellOfficial/wendell-cli --skill wendell
+```
+
+The skill teaches agents how to install the CLI, configure `wendell.toml`, build
+hosted suites from playbooks, wire the runner into CI, and inspect Wendell
+failures without embedding credentials.
+
 ## Intended split
 
 - Wendell system: turns reviewed Playbooks into hosted test suites, owns rubrics, stores traces, and reports regressions.
