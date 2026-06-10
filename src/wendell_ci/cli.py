@@ -856,7 +856,7 @@ if __name__ == "__main__":
 
 
 def _exact_agent_adapter_template(tool_contracts: list[dict[str, Any]]) -> str:
-    contracts = [dict(item) for item in tool_contracts if item.get("name")]
+    contracts = _ordered_tool_contracts([dict(item) for item in tool_contracts if item.get("name")])
     contract_literal = pprint.pformat(contracts, sort_dicts=True, width=100)
     functions = "\n\n".join(_adapter_tool_function(str(contract["name"]), dict(contract.get("arguments") or {})) for contract in contracts)
     return f'''#!/usr/bin/env python3
@@ -950,6 +950,54 @@ def _adapter_function_name(tool_name: str) -> str:
     normalized = tool_name.replace(".", "__")
     chars = [char if char.isalnum() or char == "_" else "_" for char in normalized]
     return "".join(chars).strip("_") or "tool"
+
+
+def _ordered_tool_contracts(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    remaining = list(range(len(contracts)))
+    ordered: list[dict[str, Any]] = []
+    satisfied_effects: set[str] = set()
+    requirements = [_contract_requirements(contract) for contract in contracts]
+    effects = [_contract_effects(contract) for contract in contracts]
+    required_effect_counts: dict[str, int] = {}
+    for required in requirements:
+        for effect in required:
+            required_effect_counts[effect] = required_effect_counts.get(effect, 0) + 1
+
+    while remaining:
+        ready = [index for index in remaining if requirements[index].issubset(satisfied_effects)]
+        if not ready:
+            ordered.extend(contracts[index] for index in remaining)
+            break
+        ready.sort(
+            key=lambda index: (
+                not requirements[index] and not _contract_downstream_count(effects[index], required_effect_counts),
+                -_contract_downstream_count(effects[index], required_effect_counts),
+                index,
+            )
+        )
+        selected = ready[0]
+        remaining.remove(selected)
+        ordered.append(contracts[selected])
+        satisfied_effects.update(effects[selected])
+    return ordered
+
+
+def _contract_requirements(contract: dict[str, Any]) -> set[str]:
+    requires = contract.get("requires")
+    if not isinstance(requires, list):
+        return set()
+    return {str(item) for item in requires if item}
+
+
+def _contract_effects(contract: dict[str, Any]) -> set[str]:
+    effects = contract.get("effects")
+    if not isinstance(effects, dict):
+        return set()
+    return {str(name) for name, value in effects.items() if value}
+
+
+def _contract_downstream_count(effects: set[str], required_effect_counts: dict[str, int]) -> int:
+    return sum(required_effect_counts.get(effect, 0) for effect in effects)
 
 
 def _write_local_wendell_config(

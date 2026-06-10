@@ -1053,9 +1053,48 @@ def test_generated_exact_adapter_emits_full_tool_sequence(tmp_path: Path) -> Non
     adapter_path.write_text(
         _agent_adapter_template(
             tool_contracts=[
-                {"name": "issue_transcript.read_bug", "arguments": {"case_id": "string"}},
-                {"name": "repository.inspect_files", "arguments": {"case_id": "string"}},
-                {"name": "repository.read_git_status", "arguments": {"case_id": "string"}},
+                {
+                    "name": "code_editor.apply_patch",
+                    "arguments": {"case_id": "string"},
+                    "requires": ["inspect_diffs_completed"],
+                    "effects": {"apply_patch_completed": True},
+                },
+                {
+                    "name": "issue_transcript.read_bug",
+                    "arguments": {"case_id": "string"},
+                    "requires": [],
+                    "effects": {"read_bug_completed": True},
+                },
+                {
+                    "name": "policy_guard.global_policy_boundary",
+                    "arguments": {"case_id": "string"},
+                    "requires": [],
+                    "effects": {"policy_boundary_set": True},
+                },
+                {
+                    "name": "repository.inspect_diffs",
+                    "arguments": {"case_id": "string"},
+                    "requires": ["read_git_status_completed"],
+                    "effects": {"inspect_diffs_completed": True},
+                },
+                {
+                    "name": "repository.inspect_files",
+                    "arguments": {"case_id": "string"},
+                    "requires": ["read_bug_completed"],
+                    "effects": {"inspect_files_completed": True},
+                },
+                {
+                    "name": "repository.read_git_status",
+                    "arguments": {"case_id": "string"},
+                    "requires": ["inspect_files_completed"],
+                    "effects": {"read_git_status_completed": True},
+                },
+                {
+                    "name": "test_runner.run_tests",
+                    "arguments": {"case_id": "string"},
+                    "requires": ["apply_patch_completed"],
+                    "effects": {"run_tests_completed": True},
+                },
             ]
         ),
         encoding="utf-8",
@@ -1078,6 +1117,10 @@ def test_generated_exact_adapter_emits_full_tool_sequence(tmp_path: Path) -> Non
         "issue_transcript.read_bug",
         "repository.inspect_files",
         "repository.read_git_status",
+        "repository.inspect_diffs",
+        "code_editor.apply_patch",
+        "test_runner.run_tests",
+        "policy_guard.global_policy_boundary",
     ]
     assert result["tool_calls"][0]["args"] == {"case_id": "case_id_123"}
 
