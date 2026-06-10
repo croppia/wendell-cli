@@ -883,12 +883,16 @@ def main() -> None:
         print(json.dumps({{"adapter_name": "wendell_generated_adapter", "supported_tools": SUPPORTED_TOOLS}}))
         return
     tool_calls = []
-    for tool in payload.get("available_tools", []):
-        if not isinstance(tool, dict):
-            continue
-        name = str(tool.get("name") or "")
+    available_tools = {{
+        str(tool.get("name")): tool
+        for tool in payload.get("available_tools", [])
+        if isinstance(tool, dict) and tool.get("name")
+    }}
+    for contract in TOOL_CONTRACTS:
+        name = str(contract.get("name") or "")
         if name not in DISPATCH:
             continue
+        tool = available_tools.get(name) or contract
         tool_calls.append(DISPATCH[name](tool))
     print(json.dumps({{"message": "Generated Wendell adapter completed supported tool calls.", "tool_calls": tool_calls, "metrics": {{"adapter_mode": "generated_stub"}}}}))
 

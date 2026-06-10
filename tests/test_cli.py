@@ -1048,6 +1048,40 @@ def test_cli_suites_configure_generates_exact_tool_manifest_adapter(tmp_path: Pa
     compile(adapter, str(tmp_path / "scripts" / "wendell_agent_adapter.py"), "exec")
 
 
+def test_generated_exact_adapter_emits_full_tool_sequence(tmp_path: Path) -> None:
+    adapter_path = tmp_path / "adapter.py"
+    adapter_path.write_text(
+        _agent_adapter_template(
+            tool_contracts=[
+                {"name": "issue_transcript.read_bug", "arguments": {"case_id": "string"}},
+                {"name": "repository.inspect_files", "arguments": {"case_id": "string"}},
+                {"name": "repository.read_git_status", "arguments": {"case_id": "string"}},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "schema_version": "wendell.agent_input.v1",
+        "available_tools": [{"name": "issue_transcript.read_bug", "arguments": {"case_id": "case_live"}}],
+    }
+
+    completed = subprocess.run(
+        [sys.executable, str(adapter_path)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    result = json.loads(completed.stdout)
+    assert [call["name"] for call in result["tool_calls"]] == [
+        "issue_transcript.read_bug",
+        "repository.inspect_files",
+        "repository.read_git_status",
+    ]
+    assert result["tool_calls"][0]["args"] == {"case_id": "case_id_123"}
+
+
 def test_cli_suites_configure_writes_escaped_toml_strings(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("WENDELL_CONFIG_HOME", str(tmp_path / "wendell-config"))
