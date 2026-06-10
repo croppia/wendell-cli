@@ -727,7 +727,7 @@ def test_cli_playbook_review_generates_summary_when_missing(tmp_path: Path, monk
 
     class FakeRemoteClient:
         def __init__(self, api_url: str, api_key: str | None = None) -> None:
-            pass
+            self.api_url = api_url
 
         def get_test_suite_draft(self, draft_id: str) -> dict:
             assert draft_id == "wdraft_123"
@@ -776,7 +776,7 @@ def test_cli_playbook_apply_submits_patch_operations(tmp_path: Path, monkeypatch
 
     class FakeRemoteClient:
         def __init__(self, api_url: str, api_key: str | None = None) -> None:
-            pass
+            self.api_url = api_url
 
         def get_playbook_summary(self, summary_id: str) -> dict:
             return {
@@ -818,7 +818,7 @@ def test_cli_playbook_approve_can_generate_suite(tmp_path: Path, monkeypatch, ca
 
     class FakeRemoteClient:
         def __init__(self, api_url: str, api_key: str | None = None) -> None:
-            pass
+            self.api_url = api_url
 
         def get_test_suite_draft(self, draft_id: str) -> dict:
             return {"draft": {"id": draft_id}, "latest_playbook_summary": {"id": "psum_123", "status": "in_review", "summary_payload": {}}}
@@ -924,6 +924,72 @@ def test_cli_suites_configure_writes_hosted_config_and_adapter(tmp_path: Path, m
     assert "shell=True" not in adapter
     assert "shlex.split(command)" in adapter
     assert "wendell-example" not in adapter
+
+
+def test_cli_suites_configure_generates_exact_tool_manifest_adapter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WENDELL_CONFIG_HOME", str(tmp_path / "wendell-config"))
+    assert main(["login", "--api-key", "inkpass-key", "--api-url", "http://127.0.0.1:8765"]) == 0
+
+    class FakeRemoteClient:
+        def __init__(self, api_url: str, api_key: str | None = None) -> None:
+            self.api_url = api_url
+
+        def list_test_suites(self) -> dict:
+            return {
+                "test_suites": [
+                    {
+                        "slug": "coding-agent-regression",
+                        "world_version": 1,
+                        "scenario_pack": "coding-agent-regression-pack",
+                        "scenario_pack_version": 1,
+                    }
+                ]
+            }
+
+        def get_test_suite(self, suite_slug: str) -> dict:
+            assert suite_slug == "coding-agent-regression"
+            return {
+                "world": {"slug": "coding-agent-regression"},
+                "versions": [{"version": 1}],
+                "scenario_packs": [{"slug": "coding-agent-regression-pack", "version": 1}],
+                "tool_contracts": [
+                    {
+                        "name": "issue_transcript.read_the_user_bug_report_and_constraints",
+                        "arguments": {"case_id": "string"},
+                        "effects": {"read_the_user_bug_report_and_constraints_completed": True},
+                        "reveals": ["read_the_user_bug_report_and_constraints_completed"],
+                        "requires": [],
+                        "unsafe_if": [],
+                        "scenario_coverage": ["playbook_workflow_1"],
+                    },
+                    {
+                        "name": "repository.read_git_status",
+                        "arguments": {"case_id": "string"},
+                        "effects": {"read_git_status_completed": True},
+                        "reveals": ["read_git_status_completed"],
+                        "requires": ["inspect_files_completed"],
+                        "unsafe_if": [],
+                        "scenario_coverage": ["playbook_workflow_1"],
+                    },
+                ],
+            }
+
+    monkeypatch.setattr("wendell_ci.cli.RemoteWendellClient", FakeRemoteClient)
+
+    exit_code = main(["suites", "configure", "--suite", "coding-agent-regression"])
+
+    assert exit_code == 0
+    manifest = json.loads((tmp_path / "wendell_tool_manifest.json").read_text(encoding="utf-8"))
+    assert [tool["name"] for tool in manifest["tool_contracts"]] == [
+        "issue_transcript.read_the_user_bug_report_and_constraints",
+        "repository.read_git_status",
+    ]
+    adapter = (tmp_path / "scripts" / "wendell_agent_adapter.py").read_text(encoding="utf-8")
+    assert "SUPPORTED_TOOLS" in adapter
+    assert "def issue_transcript__read_the_user_bug_report_and_constraints" in adapter
+    assert "def repository__read_git_status" in adapter
+    assert "wendell.handshake" in adapter
 
 
 def test_cli_suites_configure_writes_escaped_toml_strings(tmp_path: Path, monkeypatch) -> None:
@@ -1160,6 +1226,131 @@ def test_cli_run_suite_reuses_stored_credential_for_remote_runtime(
     assert captured["create_run_api_key"] == "stored-runner-key"
     assert captured["create_run"]["world"] == "commerce-support"
     assert "Suite run: run_remote" in capsys.readouterr().out
+
+
+def test_cli_run_preflight_blocks_missing_adapter_tools_before_create_run(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("WENDELL_CONFIG_HOME", str(tmp_path / "wendell-config"))
+    assert main(["login", "--api-key", "inkpass-key", "--api-url", "http://127.0.0.1:8765"]) == 0
+    agent_script = tmp_path / "agent.py"
+    agent_script.write_text(
+        "import json\n"
+        "print(json.dumps({'supported_tools': ['repository.inspect_files'], 'adapter_name': 'partial'}))\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "wendell.toml"
+    config_path.write_text(
+        f'project = "coding-agent"\nagent_command = "{sys.executable} {agent_script}"\n',
+        encoding="utf-8",
+    )
+
+    class FakeRemoteClient:
+        def __init__(self, api_url: str, api_key: str | None = None) -> None:
+            self.api_url = api_url
+
+        def list_test_suites(self) -> dict:
+            return {
+                "test_suites": [
+                    {
+                        "slug": "coding-agent-regression",
+                        "world_version": 1,
+                        "scenario_pack": "coding-agent-pack",
+                        "scenario_pack_version": 1,
+                    }
+                ]
+            }
+
+        def get_test_suite(self, suite_slug: str) -> dict:
+            return {
+                "world": {"slug": suite_slug},
+                "versions": [{"version": 1}],
+                "scenario_packs": [{"slug": "coding-agent-pack", "version": 1}],
+                "tool_contracts": [
+                    {"name": "repository.inspect_files", "arguments": {}},
+                    {"name": "repository.read_git_status", "arguments": {}},
+                ],
+            }
+
+        def create_run(self, payload: dict) -> dict:
+            raise AssertionError("preflight should fail before creating a remote run")
+
+    monkeypatch.setattr("wendell_ci.cli.RemoteWendellClient", FakeRemoteClient)
+
+    exit_code = main(["run", "--suite", "coding-agent-regression", "--config", str(config_path)])
+
+    assert exit_code == 1
+    error = capsys.readouterr().err
+    assert "preflight failed" in error
+    assert "repository.read_git_status" in error
+    assert "wendell suites configure --suite coding-agent-regression --config" in error
+
+
+def test_cli_run_skip_preflight_creates_run_with_missing_adapter_tools(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("WENDELL_CONFIG_HOME", str(tmp_path / "wendell-config"))
+    assert main(["login", "--api-key", "inkpass-key", "--api-url", "http://127.0.0.1:8765"]) == 0
+    agent_script = tmp_path / "agent.py"
+    agent_script.write_text(
+        "import json\n"
+        "print(json.dumps({'message': 'legacy adapter', 'tool_calls': []}))\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "wendell.toml"
+    config_path.write_text(
+        f'project = "coding-agent"\nagent_command = "{sys.executable} {agent_script}"\n',
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRemoteClient:
+        def __init__(self, api_url: str, api_key: str | None = None) -> None:
+            self.api_url = api_url
+
+        def list_test_suites(self) -> dict:
+            return {
+                "test_suites": [
+                    {
+                        "slug": "coding-agent-regression",
+                        "world_version": 1,
+                        "scenario_pack": "coding-agent-pack",
+                        "scenario_pack_version": 1,
+                    }
+                ]
+            }
+
+        def get_test_suite(self, suite_slug: str) -> dict:
+            return {
+                "world": {"slug": suite_slug},
+                "versions": [{"version": 1}],
+                "scenario_packs": [{"slug": "coding-agent-pack", "version": 1}],
+                "tool_contracts": [{"name": "repository.read_git_status", "arguments": {}}],
+            }
+
+        def create_run(self, payload: dict) -> dict:
+            captured["create_run"] = payload
+            return {"run_id": "run_skip_preflight", "url": "/runs/run_skip_preflight"}
+
+        def get_run(self, run_id: str) -> dict:
+            return {"world_version_id": "wver_1", "scenario_pack_id": "spack_1"}
+
+        def get_run_work(self, run_id: str) -> dict:
+            return {"run_id": run_id, "done": True}
+
+        def complete_run(self, run_id: str) -> dict:
+            return {"status": "completed"}
+
+        def create_cli_session_link(self, payload: dict) -> dict:
+            return {}
+
+    monkeypatch.setattr("wendell_ci.cli.RemoteWendellClient", FakeRemoteClient)
+
+    exit_code = main(["run", "--suite", "coding-agent-regression", "--config", str(config_path), "--skip-preflight"])
+
+    assert exit_code == 0
+    assert captured["create_run"]["world"] == "coding-agent-regression"
+    assert "Suite run: run_skip_preflight" in capsys.readouterr().out
 
 
 def test_cli_run_suite_uses_runtime_world_binding_when_it_differs_from_suite_slug(

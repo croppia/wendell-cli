@@ -359,10 +359,12 @@ def _suites_configure(args: argparse.Namespace) -> int:
         suite = _resolve_suite_run_config(client, args.suite)
         if not suite["world"] or not suite["world_version"] or not suite["scenario_pack"] or not suite["scenario_pack_version"]:
             raise ValueError(f"suite `{args.suite}` is not bound to a ready scenario pack.")
+        tool_contracts = _suite_tool_contracts(client, args.suite)
         config_path = Path(args.config)
         adapter_path = Path(args.adapter)
+        manifest_path = config_path.parent / "wendell_tool_manifest.json"
         agent_command = args.agent_command or f"python {adapter_path.as_posix()}"
-        for path in [config_path, adapter_path]:
+        for path in [config_path, adapter_path, manifest_path]:
             if path.exists() and not args.force:
                 raise ValueError(f"`{path}` already exists. Re-run with --force to overwrite.")
         _write_hosted_suite_config(
@@ -370,7 +372,8 @@ def _suites_configure(args: argparse.Namespace) -> int:
             project=args.project or args.suite,
             agent_command=agent_command,
         )
-        _write_text_file(adapter_path, _agent_adapter_template())
+        _write_text_file(manifest_path, _tool_manifest_template(args.suite, tool_contracts))
+        _write_text_file(adapter_path, _agent_adapter_template(tool_contracts=tool_contracts))
         adapter_path.chmod(adapter_path.stat().st_mode | 0o111)
     except Exception as exc:
         print(f"Wendell suites configure failed: {exc}", file=sys.stderr)
@@ -380,6 +383,7 @@ def _suites_configure(args: argparse.Namespace) -> int:
         "project": args.project or args.suite,
         "config": str(config_path),
         "adapter": str(adapter_path),
+        "tool_manifest": str(manifest_path),
         "agent_command": agent_command,
         "world": suite["world"],
         "world_version": suite["world_version"],
@@ -392,6 +396,7 @@ def _suites_configure(args: argparse.Namespace) -> int:
         print(f"Configured hosted suite: {args.suite}")
         print(f"Config: {config_path}")
         print(f"Adapter: {adapter_path}")
+        print(f"Tool manifest: {manifest_path}")
         print(f"Next: set WENDELL_APP_AGENT_COMMAND or replace {adapter_path}")
         print(f"Run: wendell run --suite {args.suite} --config {config_path}")
     return 0
@@ -723,7 +728,9 @@ def _default_playbook_template(name: str, workflow_summary: str) -> str:
 """
 
 
-def _agent_adapter_template() -> str:
+def _agent_adapter_template(*, tool_contracts: list[dict[str, Any]] | None = None) -> str:
+    if tool_contracts:
+        return _exact_agent_adapter_template(tool_contracts)
     return '''#!/usr/bin/env python3
 """Wendell agent adapter template.
 
@@ -845,6 +852,99 @@ def validate_result(result: dict) -> None:
 if __name__ == "__main__":
     main()
 '''
+
+
+def _exact_agent_adapter_template(tool_contracts: list[dict[str, Any]]) -> str:
+    contracts = [dict(item) for item in tool_contracts if item.get("name")]
+    contract_json = json.dumps(contracts, indent=2, sort_keys=True)
+    functions = "\n\n".join(_adapter_tool_function(str(contract["name"]), dict(contract.get("arguments") or {})) for contract in contracts)
+    return f'''#!/usr/bin/env python3
+"""Generated Wendell adapter for exact suite tool contracts.
+
+This stub is intentionally deterministic: it advertises every generated suite
+tool and returns success-shaped tool calls for first-run integration readiness.
+Replace individual tool functions with production integrations when ready.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+
+TOOL_CONTRACTS = {contract_json}
+SUPPORTED_TOOLS = [contract["name"] for contract in TOOL_CONTRACTS]
+
+
+def main() -> None:
+    payload = json.loads(sys.stdin.read() or "{{}}")
+    if payload.get("type") == "wendell.handshake":
+        print(json.dumps({{"adapter_name": "wendell_generated_adapter", "supported_tools": SUPPORTED_TOOLS}}))
+        return
+    tool_calls = []
+    for tool in payload.get("available_tools", []):
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "")
+        if name not in DISPATCH:
+            continue
+        tool_calls.append(DISPATCH[name](tool))
+    print(json.dumps({{"message": "Generated Wendell adapter completed supported tool calls.", "tool_calls": tool_calls, "metrics": {{"adapter_mode": "generated_stub"}}}}))
+
+
+def _default_args(tool: dict, fallback_arguments: dict) -> dict:
+    arguments = tool.get("arguments") if isinstance(tool.get("arguments"), dict) else fallback_arguments
+    args = {{}}
+    for name in arguments:
+        args[str(name)] = _default_value(str(name))
+    if not args:
+        args["case_id"] = str((tool.get("case") or {{}}).get("case_id") or "case_123") if isinstance(tool.get("case"), dict) else "case_123"
+    return args
+
+
+def _default_value(name: str) -> str:
+    if name.endswith("_id") or name in {{"case_id", "request_id"}}:
+        return f"{{name}}_123"
+    if "email" in name:
+        return "owner@example.com"
+    if name == "decision":
+        return "completed"
+    return f"{{name}}_value"
+
+
+{functions}
+
+
+DISPATCH = {{
+{_adapter_dispatch_entries(contracts)}
+}}
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _adapter_tool_function(tool_name: str, arguments: dict[str, Any]) -> str:
+    function_name = _adapter_function_name(tool_name)
+    return (
+        f"def {function_name}(tool: dict) -> dict:\n"
+        f"    return {{\"name\": {tool_name!r}, \"args\": _default_args(tool, {arguments!r})}}"
+    )
+
+
+def _adapter_dispatch_entries(contracts: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"    {str(contract['name'])!r}: {_adapter_function_name(str(contract['name']))},"
+        for contract in contracts
+        if contract.get("name")
+    )
+
+
+def _adapter_function_name(tool_name: str) -> str:
+    normalized = tool_name.replace(".", "__")
+    chars = [char if char.isalnum() or char == "_" else "_" for char in normalized]
+    return "".join(chars).strip("_") or "tool"
 
 
 def _write_local_wendell_config(
@@ -1101,6 +1201,7 @@ def _suite_run_main(argv: Sequence[str]) -> int:
         action="store_true",
         help="Append the run result and private report link to $GITHUB_STEP_SUMMARY.",
     )
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip adapter tool-contract preflight.")
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
     args = parser.parse_args(list(argv))
 
@@ -1145,6 +1246,12 @@ def _suite_run_main(argv: Sequence[str]) -> int:
     if not run_config.world or not run_config.world_version or not run_config.scenario_pack or not run_config.scenario_pack_version:
         print(f"Wendell run failed: suite `{args.suite}` is not bound to a ready scenario pack.", file=sys.stderr)
         return 1
+    if not args.skip_preflight:
+        try:
+            _preflight_adapter_tool_contracts(run_config, _suite_tool_contracts(client, args.suite), suite_slug=args.suite, config_path=config_path)
+        except Exception as exc:
+            print(f"Wendell run failed: preflight failed: {exc}", file=sys.stderr)
+            return 1
     try:
         result, remote_payload = _run_suite_with_remote_upload(run_config, client=client)
     except Exception as exc:
@@ -1219,6 +1326,29 @@ def _resolve_suite_run_config(client: RemoteWendellClient, suite_slug: str) -> d
         "scenario_pack": str(suite.get("scenario_pack") or ""),
         "scenario_pack_version": str(suite.get("scenario_pack_version") or ""),
     }
+
+
+def _suite_tool_contracts(client: RemoteWendellClient, suite_slug: str) -> list[dict[str, Any]]:
+    get_test_suite = getattr(client, "get_test_suite", None)
+    if not callable(get_test_suite):
+        return []
+    try:
+        detail = get_test_suite(suite_slug)
+    except Exception:
+        return []
+    contracts = detail.get("tool_contracts") if isinstance(detail, dict) else None
+    if not isinstance(contracts, list):
+        return []
+    return [dict(item) for item in contracts if isinstance(item, dict) and item.get("name")]
+
+
+def _tool_manifest_template(suite_slug: str, tool_contracts: list[dict[str, Any]]) -> str:
+    payload = {
+        "schema_version": "wendell.tool_manifest.v1",
+        "suite": suite_slug,
+        "tool_contracts": tool_contracts,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
 def _suite_runtime_world_slug(suite: dict[str, Any], suite_slug: str) -> str:
@@ -2293,6 +2423,58 @@ def _remote_runtime_max_work_items() -> int:
         return max(1, int(raw))
     except ValueError:
         return 500
+
+
+def _preflight_adapter_tool_contracts(
+    config: RunnerConfig,
+    tool_contracts: list[dict[str, Any]],
+    *,
+    suite_slug: str,
+    config_path: Path,
+) -> None:
+    required_tools = sorted({str(contract.get("name")) for contract in tool_contracts if contract.get("name")})
+    if not required_tools:
+        return
+    if not config.agent_command:
+        raise ValueError(f"agent_command is missing; run `wendell suites configure --suite {suite_slug} --config {config_path}`.")
+    command_args = _agent_command_args(config.agent_command)
+    handshake = {
+        "type": "wendell.handshake",
+        "required_tools": required_tools,
+        "tool_contracts": tool_contracts,
+    }
+    try:
+        completed = subprocess.run(
+            command_args,
+            input=json.dumps(handshake),
+            text=True,
+            capture_output=True,
+            cwd=config.project_dir,
+            timeout=config.agent_timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"adapter handshake timed out after {config.agent_timeout_seconds:g}s") from exc
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or "no stderr"
+        raise ValueError(f"adapter handshake failed: {stderr}")
+    try:
+        payload = json.loads(completed.stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("adapter handshake must print JSON with `supported_tools`.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("adapter handshake must print a JSON object.")
+    supported = payload.get("supported_tools")
+    if not isinstance(supported, list):
+        raise ValueError("adapter handshake response must include `supported_tools`.")
+    supported_tools = {str(item) for item in supported}
+    missing = [name for name in required_tools if name not in supported_tools]
+    if missing:
+        raise ValueError(
+            "adapter is missing required tool(s): "
+            + ", ".join(missing)
+            + f". Run `wendell suites configure --suite {suite_slug} --config {config_path}` to regenerate the adapter, or pass --skip-preflight to bypass intentionally."
+        )
 
 
 def _call_remote_runtime_agent(config: RunnerConfig, work: dict) -> dict:
